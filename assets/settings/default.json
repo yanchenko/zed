@@ -553,6 +553,25 @@
     // Any unrecognized input device will fall back to system default.
     "experimental.input_audio_device": null,
   },
+  // Configuration of the DontSpeak voice integration (dictation + narration).
+  "dontspeak": {
+    // Whether to integrate with a locally running DontSpeak daemon
+    // (CapsLock dictation into Zed inputs, narration of agent replies).
+    // Has no visible effect when the daemon is not installed or not running.
+    "enabled": true,
+    // Which agent-panel agents have their replies narrated by DontSpeak.
+    // This setting can take three values:
+    //
+    // 1. Narrate only agents without DontSpeak hook wiring of their own:
+    //    "auto"
+    // 2. Narrate every agent-panel agent:
+    //    "all"
+    // 3. Never narrate agent-panel agents:
+    //    "none"
+    "narrate_panel_agents": "auto",
+    // Whether to show the DontSpeak status button in the status bar.
+    "status_bar_button": true,
+  },
   // Scrollbar related settings
   "scrollbar": {
     // When to show the scrollbar in the editor.
