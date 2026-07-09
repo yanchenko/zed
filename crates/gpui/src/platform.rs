@@ -1272,6 +1272,38 @@ impl PlatformInputHandler {
         self.handler.replace_text_in_range(None, input, window, cx);
     }
 
+    /// Inner-handler variant of [`Self::marked_text_range`] for callers that already
+    /// hold the `Window` (e.g. `Window` itself, after `take_input_handler`). The outer
+    /// method re-enters via `self.cx.update` and must not be used from inside `Window`.
+    pub(crate) fn marked_range(&mut self, window: &mut Window, cx: &mut App) -> Option<Range<usize>> {
+        self.handler.marked_text_range(window, cx)
+    }
+
+    /// Inner-handler variant of [`Self::replace_and_mark_text_in_range`]; see
+    /// [`Self::marked_range`] for why this exists.
+    pub(crate) fn replace_and_mark_text(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        new_selected_range: Option<Range<usize>>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.handler.replace_and_mark_text_in_range(
+            range_utf16,
+            new_text,
+            new_selected_range,
+            window,
+            cx,
+        );
+    }
+
+    /// Inner-handler variant of [`Self::unmark_text`]; see [`Self::marked_range`]
+    /// for why this exists.
+    pub(crate) fn unmark(&mut self, window: &mut Window, cx: &mut App) {
+        self.handler.unmark_text(window, cx);
+    }
+
     pub fn compute_ime_candidate_bounds(
         marked_range: Option<Range<usize>>,
         selection: &UTF16Selection,
