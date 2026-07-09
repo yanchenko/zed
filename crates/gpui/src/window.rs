@@ -6389,10 +6389,10 @@ pub fn outline(
 #[cfg(test)]
 mod tests {
     use crate::{
-        self as gpui, App, Bounds, Context, Element, ElementId, FocusHandle,
-        GlobalElementId, InputHandler, InspectorElementId, InteractiveElement as _, IntoElement,
-        LayoutId, ParentElement as _, Pixels, Point, Render, Style, TestAppContext,
-        UTF16Selection, VisualTestContext, Window, div,
+        self as gpui, App, Bounds, Context, Element, ElementId, FocusHandle, GlobalElementId,
+        InputHandler, InspectorElementId, InteractiveElement as _, IntoElement, LayoutId,
+        ParentElement as _, Pixels, Point, Render, Style, TestAppContext, UTF16Selection,
+        VisualTestContext, Window, div,
     };
     use std::{cell::RefCell, ops::Range, rc::Rc};
 
@@ -6454,7 +6454,11 @@ mod tests {
             })
         }
 
-        fn marked_text_range(&mut self, _window: &mut Window, _cx: &mut App) -> Option<Range<usize>> {
+        fn marked_text_range(
+            &mut self,
+            _window: &mut Window,
+            _cx: &mut App,
+        ) -> Option<Range<usize>> {
             self.state.borrow().marked_range_utf16.clone()
         }
 
@@ -6476,9 +6480,9 @@ mod tests {
             _cx: &mut App,
         ) {
             let mut state = self.state.borrow_mut();
-            state
-                .events
-                .push(format!("replace_text_in_range({replacement_range:?}, {text:?})"));
+            state.events.push(format!(
+                "replace_text_in_range({replacement_range:?}, {text:?})"
+            ));
             let range = replacement_range
                 .or_else(|| state.marked_range_utf16.clone())
                 .unwrap_or_else(|| {
@@ -6615,10 +6619,12 @@ mod tests {
 
     impl Render for TestInputView {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-            div().track_focus(&self.focus_handle).child(TestInputElement {
-                focus_handle: self.focus_handle.clone(),
-                state: self.state.clone(),
-            })
+            div()
+                .track_focus(&self.focus_handle)
+                .child(TestInputElement {
+                    focus_handle: self.focus_handle.clone(),
+                    state: self.state.clone(),
+                })
         }
     }
 

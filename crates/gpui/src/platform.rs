@@ -1275,7 +1275,11 @@ impl PlatformInputHandler {
     /// Inner-handler variant of [`Self::marked_text_range`] for callers that already
     /// hold the `Window` (e.g. `Window` itself, after `take_input_handler`). The outer
     /// method re-enters via `self.cx.update` and must not be used from inside `Window`.
-    pub(crate) fn marked_range(&mut self, window: &mut Window, cx: &mut App) -> Option<Range<usize>> {
+    pub(crate) fn marked_range(
+        &mut self,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Range<usize>> {
         self.handler.marked_text_range(window, cx)
     }
 
