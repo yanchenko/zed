@@ -5424,6 +5424,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "dontspeak_ui"
+version = "0.1.0"
+dependencies = [
+ "command_palette_hooks",
+ "dontspeak",
+ "gpui",
+ "log",
+ "settings",
+ "tempfile",
+ "ui",
+ "workspace",
+ "zed_actions",
+]
+
+[[package]]
 name = "dotenvy"
 version = "0.15.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -23058,6 +23073,7 @@ dependencies = [
  "dev_container",
  "diagnostics",
  "dontspeak",
+ "dontspeak_ui",
  "edit_prediction",
  "edit_prediction_ui",
  "editor",

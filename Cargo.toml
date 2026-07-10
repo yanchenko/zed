@@ -56,6 +56,7 @@ members = [
     "crates/diagnostics",
     "crates/docs_preprocessor",
     "crates/dontspeak",
+    "crates/dontspeak_ui",
     "crates/edit_prediction",
     "crates/edit_prediction_cli",
     "crates/edit_prediction_context",
@@ -326,6 +327,7 @@ dev_container = { path = "crates/dev_container" }
 diagnostics = { path = "crates/diagnostics" }
 dialoguer = { version = "0.12", default-features = false }
 dontspeak = { path = "crates/dontspeak" }
+dontspeak_ui = { path = "crates/dontspeak_ui" }
 editor = { path = "crates/editor" }
 encoding_selector = { path = "crates/encoding_selector" }
 env_var = { path = "crates/env_var" }
