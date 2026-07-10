@@ -2114,6 +2114,10 @@ pub struct AcpThread {
     /// gradually to create a fluid typing effect instead of choppy chunk-at-a-time
     /// updates.
     streaming_text_buffer: Option<StreamingTextBuffer>,
+    /// Content blocks to prepend to the next prompt's request only — sent to
+    /// the agent but never rendered in the user's message bubble nor kept in
+    /// the visible history. See [`Self::append_request_context_for_next_prompt`].
+    request_context_for_next_prompt: Vec<acp::ContentBlock>,
 }
 
 struct StreamingTextBuffer {
@@ -2321,6 +2325,7 @@ impl AcpThread {
             draft_prompt: None,
             ui_scroll_position: None,
             streaming_text_buffer: None,
+            request_context_for_next_prompt: Vec::new(),
         }
     }
 
@@ -3629,6 +3634,26 @@ impl AcpThread {
         self.send_inner(message, true, cx)
     }
 
+    /// Queues content blocks to include in the *next* prompt's request only.
+    ///
+    /// The blocks are prepended to the next [`acp::PromptRequest`] sent to the
+    /// agent but are never rendered in the user's visible message bubble nor
+    /// stored in the thread history — the seam DontSpeak's panel narration
+    /// uses to inject its narration spec without polluting the transcript.
+    /// Consumed (cleared) by the next send.
+    pub fn append_request_context_for_next_prompt(
+        &mut self,
+        blocks: impl IntoIterator<Item = acp::ContentBlock>,
+    ) {
+        self.request_context_for_next_prompt.extend(blocks);
+    }
+
+    /// The queued request-only blocks, for asserting on the seam in tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn request_context_for_next_prompt(&self) -> &[acp::ContentBlock] {
+        &self.request_context_for_next_prompt
+    }
+
     /// Sends a prompt without displaying a user-message bubble for it.
     /// This is used for native slash commands (e.g. `/compact`) that run a turn
     /// which produces its own thread entry (like the compaction summary). The
@@ -3653,7 +3678,16 @@ impl AcpThread {
             self.project.read(cx).path_style(cx),
             cx,
         );
-        let request = acp::PromptRequest::new(self.session_id.clone(), message.clone());
+        // Display (bubble + history) keeps only `message`; the request gains
+        // any queued request-only context blocks, spliced in ahead of it.
+        let request_blocks = if self.request_context_for_next_prompt.is_empty() {
+            message.clone()
+        } else {
+            let mut request_blocks = mem::take(&mut self.request_context_for_next_prompt);
+            request_blocks.extend(message.iter().cloned());
+            request_blocks
+        };
+        let request = acp::PromptRequest::new(self.session_id.clone(), request_blocks);
         let git_store = self.project.read(cx).git_store().clone();
 
         let client_user_message_ids = self.connection.client_user_message_ids(cx);
@@ -8616,6 +8650,68 @@ mod tests {
                 ix.unwrap()
             }
         }
+    }
+
+    #[gpui::test]
+    async fn test_request_only_context_blocks_are_sent_but_never_displayed(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let requests = Rc::new(RefCell::new(Vec::new()));
+        let connection = Rc::new(FakeAgentConnection::new().on_user_message({
+            let requests = requests.clone();
+            move |request, _thread, _cx| {
+                requests.borrow_mut().push(request);
+                async move { Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)) }.boxed_local()
+            }
+        }));
+        let thread = cx
+            .update(|cx| {
+                connection.new_session(project, PathList::new(&[Path::new(path!("/test"))]), cx)
+            })
+            .await
+            .unwrap();
+
+        thread.update(cx, |thread, _cx| {
+            thread.append_request_context_for_next_prompt([acp::ContentBlock::Text(
+                acp::TextContent::new("NARRATION-SPEC".to_string()),
+            )]);
+        });
+        thread
+            .update(cx, |thread, cx| thread.send_raw("hello", cx))
+            .await
+            .unwrap();
+        thread
+            .update(cx, |thread, cx| thread.send_raw("again", cx))
+            .await
+            .unwrap();
+
+        let text_blocks = |request: &acp::PromptRequest| {
+            request
+                .prompt
+                .iter()
+                .map(|block| match block {
+                    acp::ContentBlock::Text(text) => text.text.clone(),
+                    other => panic!("expected text block, got {other:?}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        {
+            let requests = requests.borrow();
+            assert_eq!(requests.len(), 2);
+            // The first request carries the request-only block ahead of the
+            // user's message; the queue is consumed, so the second does not.
+            assert_eq!(text_blocks(&requests[0]), ["NARRATION-SPEC", "hello"]);
+            assert_eq!(text_blocks(&requests[1]), ["again"]);
+        }
+
+        // The visible history never contains the request-only block.
+        thread.read_with(cx, |thread, cx| {
+            assert!(!thread.to_markdown(cx).contains("NARRATION-SPEC"));
+        });
     }
 
     #[derive(Clone, Default)]
