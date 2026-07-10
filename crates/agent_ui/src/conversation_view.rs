@@ -620,6 +620,11 @@ pub struct ConversationView {
     /// Shared with the child [`ThreadView`] when one is constructed.
     pub(crate) code_span_resolver: AgentCodeSpanResolver,
     request_elicitation_form_states: HashMap<ElicitationEntryId, ElicitationFormState>,
+    /// Per-session DontSpeak narration bridges, living as long as this view:
+    /// dropping one sends the daemon `SessionEnd` for its session (the same
+    /// lifecycle moment `close_all_sessions` runs in this view's release).
+    #[cfg(feature = "dontspeak")]
+    thread_narrators: HashMap<acp::SessionId, Entity<crate::thread_narrator::ThreadNarrator>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -897,6 +902,8 @@ impl ConversationView {
             draft_prompt_persist_task: None,
             code_span_resolver,
             request_elicitation_form_states: HashMap::default(),
+            #[cfg(feature = "dontspeak")]
+            thread_narrators: HashMap::default(),
             _subscriptions: subscriptions,
             focus_handle: cx.focus_handle(),
         }
@@ -1237,7 +1244,7 @@ impl ConversationView {
     }
 
     fn new_thread_view(
-        &self,
+        &mut self,
         thread: Entity<AcpThread>,
         conversation: Entity<Conversation>,
         resumed_without_history: bool,
@@ -1340,6 +1347,22 @@ impl ConversationView {
             cx.subscribe_in(&thread, window, Self::handle_thread_event),
             cx.observe(&action_log, |_, _, cx| cx.notify()),
         ];
+
+        // Narrate this thread's replies through the DontSpeak daemon (a
+        // no-op unless the daemon is connected and settings allow it).
+        // Subagent output already surfaces in its parent thread, so only
+        // root sessions get a narrator.
+        #[cfg(feature = "dontspeak")]
+        if thread.read(cx).parent_session_id().is_none() {
+            self.thread_narrators.insert(
+                session_id.clone(),
+                crate::thread_narrator::ThreadNarrator::attach(
+                    &thread,
+                    self.agent.agent_id().0.clone(),
+                    cx,
+                ),
+            );
+        }
 
         let subagent_sessions = thread
             .read(cx)

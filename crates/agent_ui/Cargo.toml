@@ -23,6 +23,7 @@ test-support = [
     "agent/test-support",
 ]
 audio = ["dep:audio"]
+dontspeak = ["dep:dontspeak"]
 unit-eval = []
 
 [dependencies]
@@ -48,6 +49,7 @@ command_palette_hooks.workspace = true
 component.workspace = true
 context_server.workspace = true
 db.workspace = true
+dontspeak = { workspace = true, optional = true }
 editor.workspace = true
 eval_utils = { workspace = true, optional = true }
 extension.workspace = true
