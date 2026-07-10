@@ -1359,7 +1359,7 @@ impl ConversationView {
                 session_id.clone(),
                 crate::thread_narrator::ThreadNarrator::attach(
                     &thread,
-                    self.agent.agent_id().0.clone(),
+                    self.agent.agent_id().0,
                     cx,
                 ),
             );
