@@ -204,6 +204,11 @@ impl DontSpeak {
             self.start(cx);
         } else if !enabled && running {
             self.stop(cx);
+        } else {
+            // No connection-state change (e.g. starting up with the
+            // integration disabled), but the palette filter still needs to
+            // reflect the current status.
+            self.update_action_visibilities(cx);
         }
     }
 
@@ -392,6 +397,23 @@ mod tests {
             dontspeak.read_with(cx, |this, _| this.status()),
             Status::Disabled
         );
+    }
+
+    #[gpui::test]
+    async fn test_starting_disabled_hides_all_palette_actions(cx: &mut TestAppContext) {
+        init_test(cx);
+        set_enabled(cx, false);
+
+        let temp = tempfile::tempdir().unwrap();
+        let socket_path = temp.path().join("dontspeak.sock");
+        let _dontspeak = cx.new(|cx| DontSpeak::new(socket_path, cx));
+        cx.update(|cx| {
+            let filter = CommandPaletteFilter::try_global(cx).unwrap();
+            assert!(filter.is_hidden(&ToggleDictation));
+            assert!(filter.is_hidden(&StopSpeech));
+            assert!(filter.is_hidden(&OpenVoiceSettings));
+            assert!(filter.is_hidden(&Reconnect));
+        });
     }
 
     #[gpui::test]
