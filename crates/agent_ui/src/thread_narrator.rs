@@ -104,6 +104,11 @@ pub struct ThreadNarrator {
     /// Per-entry scheduled sends. Dropping a task cancels it.
     pending: HashMap<usize, Task<()>>,
     was_generating: bool,
+    /// Whether the narration spec has been queued onto the thread yet. Set
+    /// once so late activation (daemon connecting after this thread opened)
+    /// injects exactly one spec, and a re-check on later turns can catch the
+    /// case where narration was not active at construction.
+    spec_injected: bool,
     sink: Rc<dyn NarrationSink>,
     _thread_subscription: Subscription,
 }
@@ -126,29 +131,19 @@ impl ThreadNarrator {
         cx: &mut Context<Self>,
     ) -> Self {
         let session = thread.read(cx).session_id().to_string();
-        let this = Self {
+        let mut this = Self {
             session,
             agent_id,
             generation: 0,
             touched: BTreeSet::new(),
             pending: HashMap::default(),
             was_generating: thread.read(cx).status() == ThreadStatus::Generating,
+            spec_injected: false,
             sink,
             _thread_subscription: cx.subscribe(thread, Self::handle_thread_event),
         };
 
-        // Panel-narrated agents don't run DontSpeak's UserPromptSubmit hook,
-        // so they get the narration spec here instead: queued as a
-        // request-only content block on the session's first prompt — sent to
-        // the agent (whose server-side session history retains it for the
-        // whole session) but never rendered in the user's message bubble.
-        if this.narration_active(cx) {
-            thread.update(cx, |thread, _cx| {
-                thread.append_request_context_for_next_prompt([acp::ContentBlock::Text(
-                    acp::TextContent::new(narration_spec()),
-                )]);
-            });
-        }
+        this.maybe_inject_spec(thread, cx);
 
         cx.on_release(|this: &mut Self, cx: &mut App| {
             // The thread is closing for good: reclaim its daemon-side queue
@@ -165,6 +160,39 @@ impl ThreadNarrator {
         .detach();
 
         this
+    }
+
+    /// Queues the narration spec as a request-only content block on the
+    /// thread's next prompt — once, and only while narration is active.
+    ///
+    /// Panel-narrated agents don't run DontSpeak's UserPromptSubmit hook, so
+    /// they get the spec here instead: it is sent to the agent (whose
+    /// server-side session history retains it for the whole session) but
+    /// never rendered in the user's message bubble. The spec file is read on
+    /// the background executor rather than the UI thread, and injection is
+    /// retried from the turn-start path so a daemon that connects *after*
+    /// this thread opened still gets the spec (onto a later prompt, which the
+    /// server-side history retains all the same).
+    fn maybe_inject_spec(&mut self, thread: &Entity<AcpThread>, cx: &mut Context<Self>) {
+        if self.spec_injected || !self.narration_active(cx) {
+            return;
+        }
+        self.spec_injected = true;
+        let thread = thread.downgrade();
+        cx.spawn(async move |_this, cx| {
+            let spec = cx
+                .background_executor()
+                .spawn(async { narration_spec() })
+                .await;
+            thread
+                .update(cx, |thread, _cx| {
+                    thread.append_request_context_for_next_prompt([acp::ContentBlock::Text(
+                        acp::TextContent::new(spec),
+                    )]);
+                })
+                .ok();
+        })
+        .detach();
     }
 
     fn handle_thread_event(
@@ -194,6 +222,9 @@ impl ThreadNarrator {
                 self.finalize_turn(&thread, cx);
             }
             AcpThreadEvent::StatusChanged => {
+                // Catch narration that became active after construction (e.g.
+                // the daemon connected once this thread was already open).
+                self.maybe_inject_spec(&thread, cx);
                 let generating = thread.read(cx).status() == ThreadStatus::Generating;
                 if generating && !self.was_generating && self.narration_active(cx) {
                     // Mirror of the hooks' UserPromptSubmit → MarkActive: a
@@ -706,6 +737,8 @@ mod tests {
         init_test(cx);
         set_narrate_setting(cx, settings::NarratePanelAgents::All);
         let fixture = build(cx, "stub").await;
+        // The spec is read off the UI thread, so let the injection settle.
+        cx.run_until_parked();
 
         // The narrator queued exactly one request-only spec block on the
         // thread; `acp_thread` owns delivering it with the first prompt.
@@ -716,6 +749,7 @@ mod tests {
         // A hook-wired agent under `auto` gets no spec (its hook injects one).
         set_narrate_setting(cx, settings::NarratePanelAgents::Auto);
         let fixture = build(cx, CODEX_ID).await;
+        cx.run_until_parked();
         fixture.thread.read_with(cx, |thread, _| {
             assert_eq!(thread.request_context_for_next_prompt().len(), 0);
         });

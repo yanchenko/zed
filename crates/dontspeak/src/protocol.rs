@@ -129,6 +129,13 @@ pub enum FrontendEvent {
     Cancelled,
     /// The daemon refused the dictation (e.g. deferred-confirm refusal).
     Refused,
+    /// Forward-compat fallback: a frontend `event` tag this build doesn't
+    /// know about decodes to `Unknown` rather than failing the line — a
+    /// parse error would drop the whole subscription and churn reconnects.
+    /// The enclosing `frontend_event` stays non-terminal, and the dictation
+    /// controller ignores `Unknown`. Mirrors [`Response::Unknown`].
+    #[serde(other)]
+    Unknown,
 }
 
 impl Response {
@@ -320,6 +327,26 @@ mod tests {
             serde_json::from_str(r#"{"ok":"some_future_variant","extra":"field","n":42}"#).unwrap();
         assert_eq!(resp, Response::Unknown);
         assert!(resp.is_terminal());
+    }
+
+    /// Version-skew guard for the flattened frontend-event tag: an unknown
+    /// `event` must decode to `FrontendEvent::Unknown` inside a still-
+    /// non-terminal `frontend_event`, not fail the line (which would drop
+    /// the live subscription and churn reconnects).
+    #[test]
+    fn unrecognized_frontend_event_falls_back_to_unknown() {
+        let resp: Response = serde_json::from_str(
+            r#"{"ok":"frontend_event","event":"some_future_event","text":"x","seq":9}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            resp,
+            Response::FrontendEvent {
+                event: FrontendEvent::Unknown,
+                seq: 9,
+            }
+        );
+        assert!(!resp.is_terminal());
     }
 
     #[test]

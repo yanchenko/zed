@@ -203,6 +203,9 @@ impl DictationController {
                 self.set_phase(DictationPhase::Idle, cx);
                 self.clear_mark(cx);
             }
+            // A lifecycle event kind this build doesn't understand: leave the
+            // in-flight dictation state untouched rather than guessing.
+            FrontendEvent::Unknown => {}
         }
     }
 
@@ -270,6 +273,9 @@ impl DictationController {
     ) {
         let inserted = self.ops.insert_text(window, text, cx);
         if inserted && submit {
+            // The ack reflects insertion only: once the text has landed the
+            // utterance is delivered, so a (near-impossible) Enter-dispatch
+            // failure is best-effort and does not trigger the paste fallback.
             self.ops.dispatch_enter(window, cx);
         }
         self.ops.ack(seq, inserted, cx);

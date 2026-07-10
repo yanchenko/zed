@@ -3640,7 +3640,8 @@ impl AcpThread {
     /// agent but are never rendered in the user's visible message bubble nor
     /// stored in the thread history — the seam DontSpeak's panel narration
     /// uses to inject its narration spec without polluting the transcript.
-    /// Consumed (cleared) by the next send.
+    /// Consumed (cleared) by the next send of any kind — including a native
+    /// slash command via [`Self::send_command`], not only a user prompt.
     pub fn append_request_context_for_next_prompt(
         &mut self,
         blocks: impl IntoIterator<Item = acp::ContentBlock>,
@@ -8708,9 +8709,13 @@ mod tests {
             assert_eq!(text_blocks(&requests[1]), ["again"]);
         }
 
-        // The visible history never contains the request-only block.
+        // The visible history renders the user's own messages but never the
+        // request-only block spliced in ahead of them (asserting the user
+        // message is present keeps the negative check from going vacuous).
         thread.read_with(cx, |thread, cx| {
-            assert!(!thread.to_markdown(cx).contains("NARRATION-SPEC"));
+            let markdown = thread.to_markdown(cx);
+            assert!(markdown.contains("hello"), "user message should render");
+            assert!(!markdown.contains("NARRATION-SPEC"));
         });
     }
 

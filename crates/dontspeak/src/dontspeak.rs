@@ -331,6 +331,11 @@ impl DontSpeak {
                 }
             }
 
+            // Back off between every attempt, including while the daemon is
+            // absent: the delay only resets on a successful subscribe (above),
+            // so an uninstalled/stopped daemon settles into a cheap poll at
+            // `MAX_RECONNECT_DELAY`. The `Reconnect` action calls `start()`,
+            // which resets it for an immediate retry.
             cx.background_executor().timer(delay).await;
             delay = (delay * 2).min(MAX_RECONNECT_DELAY);
         }
