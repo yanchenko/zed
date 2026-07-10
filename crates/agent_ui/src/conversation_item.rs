@@ -9,17 +9,23 @@ use std::time::Duration;
 
 use gpui::{
     Animation, AnimationExt as _, App, Entity, EventEmitter, FocusHandle, Focusable, SharedString,
-    Subscription, Window, prelude::*, pulsating_between,
+    Subscription, WeakEntity, Window, prelude::*, pulsating_between,
 };
 use settings::Settings as _;
 use theme_settings::ThemeSettings;
 use ui::{Tab, prelude::*, utils::WithRemSize};
-use workspace::{Item, item::ItemEvent};
+use workspace::{Item, PathList, Workspace, item::ItemEvent, pane};
 
+use crate::Agent;
+use crate::conversation_host::{ConversationHost, VisibilityChangedCallback};
 use crate::conversation_view::ConversationView;
+use crate::thread_metadata_store::ThreadId;
 
 pub struct ConversationItem {
     view: Entity<ConversationView>,
+    /// The hosted view's workspace, captured here so host queries (which can
+    /// run while the view itself is being updated) never read the view.
+    workspace: WeakEntity<Workspace>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -32,8 +38,11 @@ impl ConversationItem {
             cx.notify();
         })];
 
+        let workspace = view.read(cx).workspace().clone();
+
         Self {
             view,
+            workspace,
             _subscriptions,
         }
     }
@@ -128,6 +137,66 @@ impl Item for ConversationItem {
 
     // `can_split` stays false (the trait default), so `clone_on_split` is
     // never called: a thread is hosted exactly once.
+}
+
+/// A center-pane host wraps exactly one conversation: the view is visible
+/// when its item is the active item of the pane hosting it.
+impl ConversationHost for Entity<ConversationItem> {
+    fn is_view_visible(&self, view: &Entity<ConversationView>, cx: &App) -> bool {
+        if self.read(cx).view.entity_id() != view.entity_id() {
+            return false;
+        }
+        let Some(workspace) = self.read(cx).workspace.upgrade() else {
+            return false;
+        };
+
+        workspace.read(cx).pane_for(self).is_some_and(|pane| {
+            pane.read(cx)
+                .active_item()
+                .is_some_and(|active| active.item_id() == self.entity_id())
+        })
+    }
+
+    fn reveal_thread(
+        &self,
+        _agent: Agent,
+        _thread_id: ThreadId,
+        _work_dirs: Option<PathList>,
+        _title: Option<SharedString>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        // An item hosts exactly one conversation, so the thread to reveal is
+        // already determined by `self`: activating the item reveals it.
+        let Some(workspace) = self.read(cx).workspace.upgrade() else {
+            return;
+        };
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.activate_item(self, true, true, window, cx);
+        });
+    }
+
+    fn subscribe_to_visibility_changes(
+        &self,
+        window: &Window,
+        cx: &mut Context<ConversationView>,
+        on_change: VisibilityChangedCallback,
+    ) -> Option<Subscription> {
+        let workspace = self.read(cx).workspace.upgrade()?;
+        let pane = workspace.read(cx).pane_for(self)?;
+
+        Some(cx.subscribe_in(
+            &pane,
+            window,
+            move |this, _, event: &pane::Event, window, cx| match event {
+                pane::Event::ActivateItem { .. } | pane::Event::Focus => {
+                    on_change(this, window, cx);
+                }
+                _ => {}
+            },
+        ))
+    }
 }
 
 impl Render for ConversationItem {
@@ -279,5 +348,107 @@ mod tests {
         let mut item_events = Vec::new();
         <ConversationItem as Item>::to_item_events(&(), &mut |event| item_events.push(event));
         assert_eq!(item_events, vec![ItemEvent::UpdateTab]);
+    }
+
+    #[gpui::test]
+    async fn test_host_visibility_tracks_pane_active_item(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (conversation_view, workspace, cx) = setup_conversation_view(cx).await;
+
+        let item = cx.update(|_window, cx| {
+            cx.new(|cx| ConversationItem::new(conversation_view.clone(), cx))
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_item_to_active_pane(Box::new(item.clone()), None, true, window, cx);
+        });
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            assert!(
+                item.is_view_visible(&conversation_view, cx),
+                "the view should be visible while its item is the active pane item"
+            );
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let placeholder = cx.new(|cx| PlaceholderItem {
+                focus_handle: cx.focus_handle(),
+            });
+            workspace.add_item_to_active_pane(Box::new(placeholder), None, true, window, cx);
+        });
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            assert!(
+                !item.is_view_visible(&conversation_view, cx),
+                "the view should be hidden while another pane item is active"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_reveal_thread_activates_item(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (conversation_view, workspace, cx) = setup_conversation_view(cx).await;
+
+        let item = cx.update(|_window, cx| {
+            cx.new(|cx| ConversationItem::new(conversation_view.clone(), cx))
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_item_to_active_pane(Box::new(item.clone()), None, true, window, cx);
+            let placeholder = cx.new(|cx| PlaceholderItem {
+                focus_handle: cx.focus_handle(),
+            });
+            workspace.add_item_to_active_pane(Box::new(placeholder), None, true, window, cx);
+        });
+        cx.run_until_parked();
+
+        let thread_id = conversation_view.read_with(cx, |view, _cx| view.thread_id);
+        cx.update(|window, cx| {
+            item.reveal_thread(
+                Agent::Custom { id: "Test".into() },
+                thread_id,
+                None,
+                None,
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let active = workspace
+            .read_with(cx, |workspace, cx| workspace.active_item(cx))
+            .and_then(|active| active.downcast::<ConversationItem>());
+        assert_eq!(
+            active.map(|active| active.entity_id()),
+            Some(item.entity_id()),
+            "reveal_thread should re-activate the item hosting the thread"
+        );
+    }
+
+    struct PlaceholderItem {
+        focus_handle: FocusHandle,
+    }
+
+    impl Item for PlaceholderItem {
+        type Event = ();
+
+        fn tab_content_text(&self, _detail: usize, _cx: &App) -> SharedString {
+            "Placeholder".into()
+        }
+    }
+
+    impl EventEmitter<()> for PlaceholderItem {}
+
+    impl Focusable for PlaceholderItem {
+        fn focus_handle(&self, _cx: &App) -> FocusHandle {
+            self.focus_handle.clone()
+        }
+    }
+
+    impl Render for PlaceholderItem {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            gpui::Empty
+        }
     }
 }

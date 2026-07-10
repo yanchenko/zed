@@ -38,6 +38,7 @@ use crate::ExpandMessageEditor;
 use crate::ManageProfiles;
 use crate::agent_connection_store::AgentConnectionStore;
 use crate::completion_provider::{AgentContextSelection, AgentContextSource};
+use crate::conversation_host::{ConversationHost, VisibilityChangedCallback};
 use crate::terminal_thread_metadata_store::{
     TerminalThreadMetadata, TerminalThreadMetadataStore, compose_terminal_thread_title,
     terminal_title_without_prefix,
@@ -4948,6 +4949,78 @@ pub enum AgentPanelEvent {
 
 impl EventEmitter<PanelEvent> for AgentPanel {}
 impl EventEmitter<AgentPanelEvent> for AgentPanel {}
+
+/// The dock host every conversation starts in. The panel presents one
+/// conversation at a time, so a view is visible when the panel is its
+/// workspace's visible dock panel and the view is the panel's visible
+/// surface.
+impl ConversationHost for Entity<AgentPanel> {
+    fn is_view_visible(&self, view: &Entity<ConversationView>, cx: &App) -> bool {
+        let Some(workspace) = self.read(cx).workspace.upgrade() else {
+            return false;
+        };
+
+        AgentPanel::is_visible(&workspace, cx)
+            && self
+                .read(cx)
+                .visible_conversation_view()
+                .map(|conversation_view| conversation_view.entity_id())
+                == Some(view.entity_id())
+    }
+
+    fn reveal_thread(
+        &self,
+        agent: Agent,
+        thread_id: ThreadId,
+        work_dirs: Option<PathList>,
+        title: Option<SharedString>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let Some(workspace) = self.read(cx).workspace.upgrade() else {
+            return;
+        };
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.reveal_panel::<AgentPanel>(window, cx);
+            if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                panel.update(cx, |panel, cx| {
+                    panel.load_agent_thread(
+                        agent,
+                        thread_id,
+                        work_dirs,
+                        title,
+                        true,
+                        AgentThreadSource::AgentPanel,
+                        window,
+                        cx,
+                    );
+                });
+            }
+            workspace.focus_panel::<AgentPanel>(window, cx);
+        });
+    }
+
+    fn subscribe_to_visibility_changes(
+        &self,
+        window: &Window,
+        cx: &mut Context<ConversationView>,
+        on_change: VisibilityChangedCallback,
+    ) -> Option<Subscription> {
+        Some(cx.subscribe_in(
+            self,
+            window,
+            move |this, _, event: &AgentPanelEvent, window, cx| match event {
+                AgentPanelEvent::ActiveViewChanged | AgentPanelEvent::ActiveViewFocused => {
+                    on_change(this, window, cx);
+                }
+                AgentPanelEvent::EntryChanged
+                | AgentPanelEvent::TerminalClosed { .. }
+                | AgentPanelEvent::ThreadInteracted { .. } => {}
+            },
+        ))
+    }
+}
 
 impl Panel for AgentPanel {
     fn persistent_name() -> &'static str {

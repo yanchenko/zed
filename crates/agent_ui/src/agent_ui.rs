@@ -9,6 +9,7 @@ mod completion_provider;
 mod config_options;
 mod context;
 mod context_server_configuration;
+mod conversation_host;
 mod conversation_item;
 pub(crate) mod conversation_view;
 mod diagnostics;
