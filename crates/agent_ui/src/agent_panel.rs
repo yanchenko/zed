@@ -49,10 +49,11 @@ use crate::{
     NewNativeAgentThreadFromSummary,
 };
 use crate::{
-    AgentDiffPane, ConversationView, CopyThreadToClipboard, Follow, LoadThreadFromClipboard,
-    NewTerminalThread, NewThread, OpenActiveThreadAsMarkdown, OpenAgentDiff, ResetFastModeWarnings,
-    ResetTrialEndUpsell, ResetTrialUpsell, ShowAllSidebarThreadMetadata, ShowThreadMetadata,
-    ToggleNewThreadMenu, ToggleOptionsMenu,
+    AgentDiffPane, ConversationItem, ConversationView, CopyThreadToClipboard, Follow,
+    LoadThreadFromClipboard, NewTerminalThread, NewThread, OpenActiveThreadAsMarkdown,
+    OpenAgentDiff, OpenThreadInCenter, ResetFastModeWarnings, ResetTrialEndUpsell,
+    ResetTrialUpsell, ShowAllSidebarThreadMetadata, ShowThreadMetadata, ToggleNewThreadMenu,
+    ToggleOptionsMenu,
     conversation_view::{
         AcpThreadViewEvent, RootThreadUpdated, ThreadView, reset_fast_mode_warnings,
     },
@@ -461,6 +462,9 @@ pub fn init(cx: &mut App) {
                     if let Some(thread) = thread {
                         AgentDiffPane::deploy_in_workspace(thread, workspace, window, cx);
                     }
+                })
+                .register_action(|workspace, _: &OpenThreadInCenter, window, cx| {
+                    ConversationItem::open_visible_panel_thread_in_center(workspace, window, cx);
                 })
                 .register_action(|workspace, _: &ToggleOptionsMenu, window, cx| {
                     if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
@@ -3270,6 +3274,84 @@ impl AgentPanel {
         }
     }
 
+    /// Removes the visible thread from every panel slot and returns its live
+    /// view so a center-pane [`ConversationItem`] can host it (the
+    /// [`OpenThreadInCenter`] transfer); the panel falls back to its draft.
+    /// Returns `None` when nothing transferable is visible: no thread, or an
+    /// ephemeral draft with no content.
+    pub fn take_visible_thread_for_center(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<ConversationView>> {
+        let BaseView::AgentThread { conversation_view } = &self.base_view else {
+            return None;
+        };
+        let conversation_view = conversation_view.clone();
+        let is_ephemeral_draft = self
+            .draft_thread
+            .as_ref()
+            .is_some_and(|draft| draft.entity_id() == conversation_view.entity_id());
+        if is_ephemeral_draft && !self.draft_has_content(&conversation_view, cx) {
+            return None;
+        }
+
+        let thread_id = conversation_view.read(cx).thread_id;
+        self.base_view = BaseView::Uninitialized;
+        self.retained_threads.remove(&thread_id);
+        if is_ephemeral_draft {
+            self.draft_thread = None;
+            self._draft_editor_observation = None;
+        }
+
+        // A pop-up notification's visibility subscription pins the host that
+        // created it; drop any pop-ups rather than leaving them subscribed to
+        // the host the view is leaving.
+        conversation_view.update(cx, |conversation_view, cx| {
+            conversation_view.dismiss_notifications(cx);
+        });
+
+        self.activate_draft(false, AgentThreadSource::AgentPanel, window, cx);
+        if matches!(self.base_view, BaseView::Uninitialized) {
+            // No draft could be activated (e.g. no open project); still
+            // refresh subscriptions and announce the change ourselves.
+            self.refresh_base_view_subscriptions(window, cx);
+            cx.emit(AgentPanelEvent::ActiveViewChanged);
+        }
+        cx.notify();
+        Some(conversation_view)
+    }
+
+    /// Makes `conversation_view` the panel's visible thread after a host
+    /// transfer from a center-pane [`ConversationItem`] (the
+    /// [`crate::MoveThreadToPanel`] transfer).
+    pub fn adopt_conversation_view(
+        &mut self,
+        conversation_view: Entity<ConversationView>,
+        focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let thread_id = conversation_view.read(cx).thread_id;
+
+        // See `take_visible_thread_for_center`: pop-up notification
+        // subscriptions pin the old host, so drop them on transfer.
+        conversation_view.update(cx, |conversation_view, cx| {
+            conversation_view.dismiss_notifications(cx);
+        });
+
+        self.set_base_view(
+            BaseView::AgentThread { conversation_view },
+            focus,
+            window,
+            cx,
+        );
+        // A thread is hosted in exactly one place: if a stale duplicate of
+        // this thread was parked in the panel, the adopted view replaces it.
+        self.retained_threads.remove(&thread_id);
+        cx.notify();
+    }
+
     /// Drops a thread — retained or the active ephemeral draft — from
     /// the panel and deletes its metadata row. Used by the sidebar when
     /// the user dismisses a parked draft.
@@ -5706,6 +5788,9 @@ impl AgentPanel {
                                         }
                                     });
                                 }
+
+                                menu = menu
+                                    .action("Open Thread in Center", Box::new(OpenThreadInCenter));
 
                                 menu = menu.separator();
                             }

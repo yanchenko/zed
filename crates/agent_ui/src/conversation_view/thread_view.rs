@@ -12112,7 +12112,24 @@ pub(crate) fn open_link(
             }
             MentionUri::Selection { abs_path: None, .. } => {}
             MentionUri::Thread { id, name } => {
-                if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                // A thread hosted as a center-pane item is activated in
+                // place; the panel path applies only to threads the panel
+                // hosts (a thread is hosted in exactly one place).
+                let thread_id = ThreadMetadataStore::try_global(cx).and_then(|store| {
+                    store
+                        .read(cx)
+                        .entry_by_session(&id)
+                        .map(|metadata| metadata.thread_id)
+                });
+                let center_item = crate::ConversationItem::find_for_session(workspace, &id, cx)
+                    .or_else(|| {
+                        thread_id.and_then(|thread_id| {
+                            crate::ConversationItem::find_for_thread(workspace, thread_id, cx)
+                        })
+                    });
+                if let Some(center_item) = center_item {
+                    workspace.activate_item(&center_item, true, true, window, cx);
+                } else if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
                     panel.update(cx, |panel, cx| {
                         panel.open_thread(id, None, Some(name.into()), window, cx)
                     });

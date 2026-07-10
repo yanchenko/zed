@@ -253,6 +253,10 @@ actions!(
         OpenActiveThreadAsMarkdown,
         /// Opens the agent diff view to review changes.
         OpenAgentDiff,
+        /// Opens the agent panel's visible thread as a tab in the center pane.
+        OpenThreadInCenter,
+        /// Moves a center-pane thread tab back into the agent panel.
+        MoveThreadToPanel,
         /// Copies the current thread to the clipboard as JSON for debugging.
         CopyThreadToClipboard,
         /// Loads a thread from the clipboard JSON for debugging.
