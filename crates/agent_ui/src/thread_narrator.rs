@@ -126,7 +126,7 @@ impl ThreadNarrator {
         cx: &mut Context<Self>,
     ) -> Self {
         let session = thread.read(cx).session_id().to_string();
-        let mut this = Self {
+        let this = Self {
             session,
             agent_id,
             generation: 0,
