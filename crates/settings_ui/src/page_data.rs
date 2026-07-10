@@ -13,9 +13,9 @@ use crate::{
     ActionLink, DynamicItem, PROJECT, SettingField, SettingItem, SettingsFieldMetadata,
     SettingsPage, SettingsPageItem, SubPageLink, USER, active_language, all_language_names,
     pages::{
-        open_audio_test_window, render_edit_prediction_setup_page, render_external_agents_page,
-        render_llm_providers_page, render_mcp_servers_page, render_sandbox_settings_page,
-        render_skills_setup_page, render_tool_permissions_setup_page,
+        open_audio_test_window, render_dontspeak_page, render_edit_prediction_setup_page,
+        render_external_agents_page, render_llm_providers_page, render_mcp_servers_page,
+        render_sandbox_settings_page, render_skills_setup_page, render_tool_permissions_setup_page,
     },
 };
 
@@ -77,9 +77,109 @@ pub(crate) fn settings_data(cx: &App) -> Vec<SettingsPage> {
         version_control_page(),
         collaboration_page(),
         ai_page(cx),
+        voice_page(),
         network_page(),
         developer_page(cx),
     ]
+}
+
+/// The Voice page: settings for Zed's native DontSpeak integration
+/// (CapsLock dictation + spoken narration of agent replies), plus a
+/// sub-page replacing DontSpeak's tray/status window (daemon status, model
+/// readiness, test recognition).
+fn voice_page() -> SettingsPage {
+    SettingsPage {
+        title: "Voice",
+        items: Box::new([
+            SettingsPageItem::SectionHeader("General"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Enable DontSpeak Integration",
+                description: "Whether to integrate with a locally running DontSpeak daemon (CapsLock dictation into Zed inputs, narration of agent replies). Has no visible effect when the daemon is not installed or not running.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("dontspeak.enabled"),
+                    pick: |settings_content| settings_content.dontspeak.as_ref()?.enabled.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.dontspeak.get_or_insert_default().enabled = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Narrate Panel Agents",
+                description: "Which agent-panel agents have their replies narrated by DontSpeak. \"Auto\" narrates only agents without DontSpeak hook wiring of their own.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("dontspeak.narrate_panel_agents"),
+                    pick: |settings_content| {
+                        settings_content
+                            .dontspeak
+                            .as_ref()?
+                            .narrate_panel_agents
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .dontspeak
+                            .get_or_insert_default()
+                            .narrate_panel_agents = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Status Bar Button",
+                description: "Whether to show the DontSpeak status button in the status bar.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("dontspeak.status_bar_button"),
+                    pick: |settings_content| {
+                        settings_content
+                            .dontspeak
+                            .as_ref()?
+                            .status_bar_button
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .dontspeak
+                            .get_or_insert_default()
+                            .status_bar_button = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SectionHeader("DontSpeak"),
+            SettingsPageItem::SubPageLink(SubPageLink {
+                title: "DontSpeak".into(),
+                r#type: Default::default(),
+                json_path: Some("dontspeak"),
+                description: Some(
+                    "Daemon status, speech-model readiness, and a live test of speech recognition."
+                        .into(),
+                ),
+                search_aliases: &[
+                    "capslock",
+                    "dictation",
+                    "dontspeak",
+                    "narration",
+                    "speech",
+                    "speech to text",
+                    "stt",
+                    "text to speech",
+                    "transcription",
+                    "tts",
+                    "voice",
+                ],
+                in_json: false,
+                files: USER,
+                render: render_dontspeak_page,
+            }),
+        ]),
+    }
 }
 
 fn developer_page(cx: &App) -> SettingsPage {
