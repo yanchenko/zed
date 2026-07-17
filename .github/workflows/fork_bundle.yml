@@ -15,7 +15,8 @@ permissions:
 
 concurrency:
   group: fork-bundle-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Don't cancel an in-flight Linux bundle when a Windows-only workflow fix is pushed.
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -36,11 +37,24 @@ jobs:
     env:
       ZED_RELEASE_CHANNEL: stable
       RELEASE_CHANNEL: stable
+      # Short cargo/rustup homes avoid Windows MAX_PATH failures on deep git deps
+      # (e.g. microsoft/python-environment-tools test fixtures).
+      CARGO_HOME: C:\c
+      RUSTUP_HOME: C:\r
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Enable long paths
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path C:\c, C:\r | Out-Null
+          git config --system core.longpaths true
+          New-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' `
+            -Name 'LongPathsEnabled' -Value 1 -PropertyType DWORD -Force | Out-Null
 
       - name: Free disk space
         shell: pwsh
@@ -60,8 +74,9 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: fork-bundle-windows
+          shared-key: fork-bundle-windows-c
           cache-on-failure: true
+          workspaces: "."
 
       - name: Build Zed (unsigned release)
         shell: pwsh
