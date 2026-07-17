@@ -9,6 +9,8 @@ mod completion_provider;
 mod config_options;
 mod context;
 mod context_server_configuration;
+mod conversation_host;
+mod conversation_item;
 pub(crate) mod conversation_view;
 mod diagnostics;
 pub mod draft_prompt_store;
@@ -31,6 +33,8 @@ pub mod terminal_thread_metadata_store;
 pub mod test_support;
 mod thread_import;
 pub mod thread_metadata_store;
+#[cfg(feature = "dontspeak")]
+pub mod thread_narrator;
 pub mod thread_worktree_archive;
 
 pub mod threads_archive_view;
@@ -78,6 +82,7 @@ pub use crate::inline_assistant::InlineAssistant;
 pub use crate::message_editor::MessageEditorEvent;
 pub use crate::thread_metadata_store::ThreadId;
 pub use agent_diff::{AgentDiffPane, AgentDiffToolbar};
+pub use conversation_item::ConversationItem;
 pub use conversation_view::open_markdown_in_workspace;
 pub use conversation_view::{ConversationView, StateChange};
 pub use external_source_prompt::ExternalSourcePrompt;
@@ -248,6 +253,10 @@ actions!(
         OpenActiveThreadAsMarkdown,
         /// Opens the agent diff view to review changes.
         OpenAgentDiff,
+        /// Opens the agent panel's visible thread as a tab in the center pane.
+        OpenThreadInCenter,
+        /// Moves a center-pane thread tab back into the agent panel.
+        MoveThreadToPanel,
         /// Copies the current thread to the clipboard as JSON for debugging.
         CopyThreadToClipboard,
         /// Loads a thread from the clipboard JSON for debugging.

@@ -69,7 +69,7 @@ agent.workspace = true
 agent-client-protocol.workspace = true
 agent_settings.workspace = true
 agent_skills.workspace = true
-agent_ui = { workspace = true, features = ["audio"] }
+agent_ui = { workspace = true, features = ["audio", "dontspeak"] }
 anyhow.workspace = true
 askpass.workspace = true
 assets.workspace = true
@@ -101,6 +101,8 @@ debugger_tools.workspace = true
 debugger_ui.workspace = true
 dev_container.workspace = true
 diagnostics.workspace = true
+dontspeak.workspace = true
+dontspeak_ui.workspace = true
 editor.workspace = true
 encoding_selector.workspace = true
 env_logger.workspace = true

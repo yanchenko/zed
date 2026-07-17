@@ -1,0 +1,167 @@
+# Fork-only downloadable builds (upstream workflows are org-gated / custom runners).
+# Produces Actions artifacts for Windows and Linux on the DontSpeak integration branch.
+name: fork_bundle
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - dontspeak-integration
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-bundle-${{ github.workflow }}-${{ github.ref }}
+  # Don't cancel an in-flight Linux bundle when a Windows-only workflow fix is pushed.
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  windows_x86_64:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' && (
+        github.event.action != 'labeled' ||
+        github.event.label.name == 'run-fork-bundle'
+      ))
+    runs-on: windows-latest
+    timeout-minutes: 360
+    env:
+      ZED_RELEASE_CHANNEL: stable
+      RELEASE_CHANNEL: stable
+      # Short cargo/rustup homes avoid Windows MAX_PATH failures on deep git deps
+      # (e.g. microsoft/python-environment-tools test fixtures).
+      CARGO_HOME: C:\c
+      RUSTUP_HOME: C:\r
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Enable long paths
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path C:\c, C:\r | Out-Null
+          git config --system core.longpaths true
+          New-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' `
+            -Name 'LongPathsEnabled' -Value 1 -PropertyType DWORD -Force | Out-Null
+
+      - name: Free disk space
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          Remove-Item -Recurse -Force "$env:ANDROID_HOME" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "$env:ANDROID_NDK_HOME" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "C:\Program Files\dotnet" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "C:\Program Files (x86)\Microsoft Visual Studio\2019" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "C:\Program Files\Microsoft SQL Server" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "C:\Program Files\IIS" -ErrorAction SilentlyContinue
+          Get-PSDrive C | Format-List
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: fork-bundle-windows-c
+          cache-on-failure: true
+          workspaces: "."
+
+      - name: Build Zed (unsigned release)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:ZED_RELEASE_CHANNEL = 'stable'
+          $env:RELEASE_CHANNEL = 'stable'
+          cargo build --release --package zed --package cli
+
+      - name: Package zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = "target\fork-bundle\zed-windows-x86_64"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          Copy-Item target\release\zed.exe $out\Zed.exe
+          Copy-Item target\release\cli.exe $out\cli.exe
+          # ConPTY is fetched by crates/zed/build.rs next to the binary when present.
+          if (Test-Path target\release\conpty.dll) {
+            Copy-Item target\release\conpty.dll $out\
+          }
+          Get-ChildItem target\release -Filter 'OpenConsole.exe' -Recurse -ErrorAction SilentlyContinue |
+            Select-Object -First 1 |
+            ForEach-Object { Copy-Item $_.FullName $out\OpenConsole.exe }
+          $zip = "target\fork-bundle\zed-windows-x86_64-dontspeak.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Compress-Archive -Path "$out\*" -DestinationPath $zip -Force
+          Get-Item $zip | Format-List Name, Length, FullName
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-windows-x86_64-dontspeak
+          path: target/fork-bundle/zed-windows-x86_64-dontspeak.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  linux_x86_64:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' && (
+        github.event.action != 'labeled' ||
+        github.event.label.name == 'run-fork-bundle'
+      ))
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    env:
+      CC: clang
+      CXX: clang++
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost || true
+          df -h
+
+      - name: Install system deps
+        run: ./script/linux
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: fork-bundle-linux
+          cache-on-failure: true
+
+      - name: Download WASI SDK
+        run: ./script/download-wasi-sdk
+
+      - name: Bundle Linux release
+        run: ./script/bundle-linux
+        env:
+          ZED_RELEASE_CHANNEL: stable
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-linux-x86_64-dontspeak
+          path: target/release/zed-linux-x86_64.tar.gz
+          if-no-files-found: error
+          retention-days: 30

@@ -182,6 +182,7 @@ impl VsCodeSettings {
             credentials_url: None,
             debugger: None,
             diagnostics: None,
+            dontspeak: None,
             editor: self.editor_settings_content(),
             extension: ExtensionSettingsContent::default(),
             file_finder: None,

@@ -17,8 +17,8 @@ use agent_ui::threads_archive_view::{
 };
 use agent_ui::{
     AcpThreadImportOnboarding, Agent, AgentPanel, AgentPanelEvent, AgentThreadSource,
-    ArchiveSelectedThread, CrossChannelImportOnboarding, DEFAULT_THREAD_TITLE, NewTerminalThread,
-    NewThread, RenameSelectedThread, TerminalId, ThreadId, ThreadImportModal,
+    ArchiveSelectedThread, ConversationItem, CrossChannelImportOnboarding, DEFAULT_THREAD_TITLE,
+    NewTerminalThread, NewThread, RenameSelectedThread, TerminalId, ThreadId, ThreadImportModal,
     ThreadTitleRegenerationResult, channels_with_threads, import_threads_from_other_channels,
 };
 use agent_ui::{MessageEditorEvent, StateChange, thread_worktree_archive};
@@ -3633,6 +3633,16 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut App,
     ) {
+        // A thread hosted as a center-pane item is activated in place; the
+        // agent-panel path applies only to threads the panel hosts (a thread
+        // is hosted in exactly one place).
+        let activated_in_center = workspace.update(cx, |workspace, cx| {
+            ConversationItem::activate_for_thread(workspace, metadata.thread_id, focus, window, cx)
+        });
+        if activated_in_center {
+            return;
+        }
+
         let load_thread = |agent_panel: Entity<AgentPanel>,
                            metadata: &ThreadMetadata,
                            focus: bool,

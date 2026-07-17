@@ -89,11 +89,12 @@ use crate::entry_view_state::{EntryViewEvent, ViewEvent};
 use crate::message_editor::{InputAttempt, MessageEditor, MessageEditorEvent};
 use crate::profile_selector::{ProfileProvider, ProfileSelector};
 
+use crate::conversation_host::{ConversationHost, VisibilityChangedCallback};
 use crate::thread_metadata_store::{ThreadId, ThreadMetadataStore};
 use crate::ui::{AgentNotification, AgentNotificationEvent};
 use crate::{
-    Agent, AgentDiffPane, AgentInitialContent, AgentPanel, AgentPanelEvent, AllowAlways, AllowOnce,
-    AuthorizeToolCall, ClearMessageQueue, CycleFavoriteModels, CycleModeSelector,
+    Agent, AgentDiffPane, AgentInitialContent, AgentPanel, AllowAlways, AllowOnce,
+    AuthorizeToolCall, ClearMessageQueue, ConversationItem, CycleFavoriteModels, CycleModeSelector,
     CycleThinkingEffort, EditFirstQueuedMessage, ExpandMessageEditor, Follow, KeepAll, NewThread,
     OpenAddContextMenu, OpenAgentDiff, RejectAll, RejectOnce, RemoveFirstQueuedMessage,
     ScrollOutputLineDown, ScrollOutputLineUp, ScrollOutputPageDown, ScrollOutputPageUp,
@@ -620,6 +621,11 @@ pub struct ConversationView {
     /// Shared with the child [`ThreadView`] when one is constructed.
     pub(crate) code_span_resolver: AgentCodeSpanResolver,
     request_elicitation_form_states: HashMap<ElicitationEntryId, ElicitationFormState>,
+    /// Per-session DontSpeak narration bridges, living as long as this view:
+    /// dropping one sends the daemon `SessionEnd` for its session (the same
+    /// lifecycle moment `close_all_sessions` runs in this view's release).
+    #[cfg(feature = "dontspeak")]
+    thread_narrators: HashMap<acp::SessionId, Entity<crate::thread_narrator::ThreadNarrator>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -897,6 +903,8 @@ impl ConversationView {
             draft_prompt_persist_task: None,
             code_span_resolver,
             request_elicitation_form_states: HashMap::default(),
+            #[cfg(feature = "dontspeak")]
+            thread_narrators: HashMap::default(),
             _subscriptions: subscriptions,
             focus_handle: cx.focus_handle(),
         }
@@ -1237,7 +1245,7 @@ impl ConversationView {
     }
 
     fn new_thread_view(
-        &self,
+        &mut self,
         thread: Entity<AcpThread>,
         conversation: Entity<Conversation>,
         resumed_without_history: bool,
@@ -1340,6 +1348,22 @@ impl ConversationView {
             cx.subscribe_in(&thread, window, Self::handle_thread_event),
             cx.observe(&action_log, |_, _, cx| cx.notify()),
         ];
+
+        // Narrate this thread's replies through the DontSpeak daemon (a
+        // no-op unless the daemon is connected and settings allow it).
+        // Subagent output already surfaces in its parent thread, so only
+        // root sessions get a narrator.
+        #[cfg(feature = "dontspeak")]
+        if thread.read(cx).parent_session_id().is_none() {
+            self.thread_narrators.insert(
+                session_id.clone(),
+                crate::thread_narrator::ThreadNarrator::attach(
+                    &thread,
+                    self.agent.agent_id().0,
+                    cx,
+                ),
+            );
+        }
 
         let subagent_sessions = thread
             .read(cx)
@@ -2775,6 +2799,10 @@ impl ConversationView {
             .thread(self.root_session_id.as_ref()?, cx)
     }
 
+    pub(crate) fn workspace(&self) -> &WeakEntity<Workspace> {
+        &self.workspace
+    }
+
     fn render_markdown(
         &self,
         markdown: Entity<Markdown>,
@@ -2809,22 +2837,31 @@ impl ConversationView {
 
         let multi_workspace = multi_workspace.read(cx);
         multi_workspace.sidebar_open() && multi_workspace.is_threads_list_view_active(cx)
-            || multi_workspace.workspace() == &workspace
-                && self.is_visible_in_agent_panel(&workspace, cx)
+            || multi_workspace.workspace() == &workspace && self.is_visible_in_host(cx)
     }
 
-    fn is_visible_in_agent_panel(&self, workspace: &Entity<Workspace>, cx: &Context<Self>) -> bool {
-        AgentPanel::is_visible(workspace, cx)
-            && workspace
-                .read(cx)
-                .panel::<AgentPanel>(cx)
-                .is_some_and(|panel| {
-                    panel
-                        .read(cx)
-                        .visible_conversation_view()
-                        .map(|conversation_view| conversation_view.entity_id())
-                        == Some(cx.entity_id())
-                })
+    /// The host currently presenting this view: the center-pane
+    /// [`ConversationItem`] wrapping it when one exists, the agent panel
+    /// otherwise.
+    fn current_host(&self, cx: &Context<Self>) -> Option<Box<dyn ConversationHost>> {
+        let workspace = self.workspace.upgrade()?;
+        let view_id = cx.entity_id();
+
+        let item = workspace
+            .read(cx)
+            .items_of_type::<ConversationItem>(cx)
+            .find(|item| item.read(cx).conversation_view().entity_id() == view_id);
+        if let Some(item) = item {
+            return Some(Box::new(item));
+        }
+
+        let panel = workspace.read(cx).panel::<AgentPanel>(cx)?;
+        Some(Box::new(panel))
+    }
+
+    fn is_visible_in_host(&self, cx: &Context<Self>) -> bool {
+        self.current_host(cx)
+            .is_some_and(|host| host.is_view_visible(&cx.entity(), cx))
     }
 
     fn agent_status_visible(&self, window: &Window, cx: &Context<Self>) -> bool {
@@ -2835,9 +2872,7 @@ impl ConversationView {
         if let Some(multi_workspace) = window.root::<MultiWorkspace>().flatten() {
             self.is_visible(&multi_workspace, cx)
         } else {
-            self.workspace
-                .upgrade()
-                .is_some_and(|workspace| self.is_visible_in_agent_panel(&workspace, cx))
+            self.is_visible_in_host(cx)
         }
     }
 
@@ -2847,9 +2882,7 @@ impl ConversationView {
             && if let Some(mw) = window.root::<MultiWorkspace>().flatten() {
                 self.is_visible(&mw, cx)
             } else {
-                self.workspace
-                    .upgrade()
-                    .is_some_and(|workspace| self.is_visible_in_agent_panel(&workspace, cx))
+                self.is_visible_in_host(cx)
             };
         let settings = AgentSettings::get_global(cx);
         if settings.play_sound_when_agent_done.should_play(visible) {
@@ -2973,6 +3006,7 @@ impl ConversationView {
                             cx.activate(true);
 
                             let workspace_handle = this.workspace.clone();
+                            let host = this.current_host(cx);
                             let agent = this.connection_key.clone();
                             let root_work_dirs = root_work_dirs.clone();
                             let root_title = root_title.clone();
@@ -2982,32 +3016,17 @@ impl ConversationView {
                                     .update(cx, |multi_workspace, window, cx| {
                                         window.activate_window();
                                         if let Some(workspace) = workspace_handle.upgrade() {
-                                            multi_workspace.activate(
-                                                workspace.clone(),
-                                                None,
-                                                window,
-                                                cx,
-                                            );
-                                            workspace.update(cx, |workspace, cx| {
-                                                workspace.reveal_panel::<AgentPanel>(window, cx);
-                                                if let Some(panel) =
-                                                    workspace.panel::<AgentPanel>(cx)
-                                                {
-                                                    panel.update(cx, |panel, cx| {
-                                                        panel.load_agent_thread(
-                                                            agent.clone(),
-                                                            root_thread_id,
-                                                            root_work_dirs.clone(),
-                                                            root_title.clone(),
-                                                            true,
-                                                            AgentThreadSource::AgentPanel,
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    });
-                                                }
-                                                workspace.focus_panel::<AgentPanel>(window, cx);
-                                            });
+                                            multi_workspace.activate(workspace, None, window, cx);
+                                            if let Some(host) = host {
+                                                host.reveal_thread(
+                                                    agent,
+                                                    root_thread_id,
+                                                    root_work_dirs,
+                                                    root_title,
+                                                    window,
+                                                    cx,
+                                                );
+                                            }
                                         }
                                     })
                                     .log_err();
@@ -3023,7 +3042,7 @@ impl ConversationView {
 
             self.notifications.push(screen_window);
 
-            let dismiss_if_visible = {
+            let dismiss_if_visible: VisibilityChangedCallback = Rc::new({
                 let pop_up_weak = pop_up.downgrade();
                 move |this: &ConversationView,
                       window: &mut Window,
@@ -3036,7 +3055,9 @@ impl ConversationView {
                         });
                     }
                 }
-            };
+            });
+
+            let host = self.current_host(cx);
 
             let subscriptions = self
                 .notification_subscriptions
@@ -3061,23 +3082,11 @@ impl ConversationView {
                 ));
             }
 
-            if let Some(panel) = self
-                .workspace
-                .upgrade()
-                .and_then(|workspace| workspace.read(cx).panel::<AgentPanel>(cx))
+            if let Some(host) = host
+                && let Some(subscription) =
+                    host.subscribe_to_visibility_changes(window, cx, dismiss_if_visible)
             {
-                subscriptions.push(cx.subscribe_in(
-                    &panel,
-                    window,
-                    move |this, _, event: &AgentPanelEvent, window, cx| match event {
-                        AgentPanelEvent::ActiveViewChanged | AgentPanelEvent::ActiveViewFocused => {
-                            dismiss_if_visible(this, window, cx);
-                        }
-                        AgentPanelEvent::EntryChanged
-                        | AgentPanelEvent::TerminalClosed { .. }
-                        | AgentPanelEvent::ThreadInteracted { .. } => {}
-                    },
-                ));
+                subscriptions.push(subscription);
             }
         }
     }
@@ -5530,6 +5539,96 @@ pub(crate) mod tests {
                 .iter()
                 .any(|window| window.downcast::<AgentNotification>().is_some()),
             "Notification should be closed when thread view is dropped"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_no_notification_when_thread_visible_in_center_item(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::default_response(), cx).await;
+
+        let workspace = conversation_view
+            .read_with(cx, |view, _cx| view.workspace.clone())
+            .upgrade()
+            .unwrap();
+        let item = cx.update(|_window, cx| {
+            cx.new(|cx| crate::ConversationItem::new(conversation_view.clone(), cx))
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_item_to_active_pane(Box::new(item), None, true, window, cx);
+        });
+        cx.run_until_parked();
+
+        let message_editor = message_editor(&conversation_view, cx);
+        message_editor.update_in(cx, |editor, window, cx| {
+            editor.set_text("Hello", window, cx);
+        });
+
+        // The window stays active and the center item hosting the thread is
+        // the active pane item, so the thread is visible.
+        active_thread(&conversation_view, cx)
+            .update_in(cx, |view, window, cx| view.send(window, cx));
+
+        cx.run_until_parked();
+
+        assert!(
+            !cx.windows()
+                .iter()
+                .any(|window| window.downcast::<AgentNotification>().is_some()),
+            "Expected no notification when the thread is visible in a center-pane item"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_notification_dismissed_when_center_item_activated(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::default_response(), cx).await;
+
+        let workspace = conversation_view
+            .read_with(cx, |view, _cx| view.workspace.clone())
+            .upgrade()
+            .unwrap();
+        let item = cx.update(|_window, cx| {
+            cx.new(|cx| crate::ConversationItem::new(conversation_view.clone(), cx))
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_item_to_active_pane(Box::new(item.clone()), None, true, window, cx);
+        });
+        // Cover the thread's item with another active pane item.
+        add_to_workspace(conversation_view.clone(), cx);
+        cx.run_until_parked();
+
+        let message_editor = message_editor(&conversation_view, cx);
+        message_editor.update_in(cx, |editor, window, cx| {
+            editor.set_text("Hello", window, cx);
+        });
+
+        active_thread(&conversation_view, cx)
+            .update_in(cx, |view, window, cx| view.send(window, cx));
+
+        cx.run_until_parked();
+
+        assert!(
+            cx.windows()
+                .iter()
+                .any(|window| window.downcast::<AgentNotification>().is_some()),
+            "Expected a notification while the thread's center item is not active"
+        );
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.activate_item(&item, true, true, window, cx);
+        });
+        cx.run_until_parked();
+
+        assert!(
+            !cx.windows()
+                .iter()
+                .any(|window| window.downcast::<AgentNotification>().is_some()),
+            "Notification should auto-dismiss when the thread's center item becomes active"
         );
     }
 

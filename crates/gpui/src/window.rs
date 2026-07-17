@@ -4515,6 +4515,77 @@ impl Window {
         false
     }
 
+    /// Sets IME-style marked (composition) text in the currently focused text input,
+    /// replacing any marked text already present, and places the caret at the end of
+    /// the new marked text. This drives the same `InputHandler` path platform IMEs
+    /// use, so it works with any focused text input (editors, terminals, text
+    /// fields). The marked text is not committed; call it again to update the
+    /// composition, and end it with [`Self::clear_marked_text_in_focused_input`].
+    ///
+    /// Returns `false` when no text input is focused in this window or the focused
+    /// input does not currently accept text input.
+    pub fn set_marked_text_in_focused_input(&mut self, text: &str, cx: &mut App) -> bool {
+        let Some(mut input_handler) = self.platform_window.take_input_handler() else {
+            return false;
+        };
+        let mut handled = false;
+        if input_handler.accepts_text_input(self, cx) {
+            let caret_utf16 = text.encode_utf16().count();
+            input_handler.replace_and_mark_text(
+                None,
+                text,
+                Some(caret_utf16..caret_utf16),
+                self,
+                cx,
+            );
+            handled = true;
+        }
+        self.platform_window.set_input_handler(input_handler);
+        handled
+    }
+
+    /// Ends an IME-style composition in the currently focused text input. When
+    /// `commit` is true the marked text is finalized in place (the handler's
+    /// `unmark_text` semantics); otherwise the marked text is removed from the
+    /// input. A no-op if the input has no marked text.
+    ///
+    /// This is intentionally not gated on `accepts_text_input`, so marked text can
+    /// still be cleaned up after the focused input stops accepting text.
+    ///
+    /// Returns `false` only when no text input is focused in this window.
+    pub fn clear_marked_text_in_focused_input(&mut self, commit: bool, cx: &mut App) -> bool {
+        let Some(mut input_handler) = self.platform_window.take_input_handler() else {
+            return false;
+        };
+        if input_handler.marked_range(self, cx).is_some() {
+            if commit {
+                input_handler.unmark(self, cx);
+            } else {
+                input_handler.dispatch_input("", self, cx);
+            }
+        }
+        self.platform_window.set_input_handler(input_handler);
+        true
+    }
+
+    /// Inserts text into the currently focused text input as though it had been
+    /// typed, replacing any marked (composition) text per standard IME semantics.
+    ///
+    /// Returns `false` when no text input is focused in this window or the focused
+    /// input does not currently accept text input.
+    pub fn insert_text_into_focused_input(&mut self, text: &str, cx: &mut App) -> bool {
+        let Some(mut input_handler) = self.platform_window.take_input_handler() else {
+            return false;
+        };
+        let mut handled = false;
+        if input_handler.accepts_text_input(self, cx) {
+            input_handler.dispatch_input(text, self, cx);
+            handled = true;
+        }
+        self.platform_window.set_input_handler(input_handler);
+        handled
+    }
+
     /// Return a key binding string for an action, to display in the UI. Uses the highest precedence
     /// binding for the action (last binding added to the keymap).
     pub fn keystroke_text_for(&self, action: &dyn Action) -> String {
@@ -6312,5 +6383,385 @@ pub fn outline(
         border_widths: (1.).into(),
         border_color: border_color.into(),
         border_style,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        self as gpui, App, Bounds, Context, Element, ElementId, FocusHandle, GlobalElementId,
+        InputHandler, InspectorElementId, InteractiveElement as _, IntoElement, LayoutId,
+        ParentElement as _, Pixels, Point, Render, Style, TestAppContext, UTF16Selection,
+        VisualTestContext, Window, div,
+    };
+    use std::{cell::RefCell, ops::Range, rc::Rc};
+
+    /// The model backing [`ScriptedInputHandler`]: a flat text buffer with an
+    /// optional marked (IME composition) range, all offsets in UTF-16 code
+    /// units, plus a log of the `InputHandler` mutations that were invoked.
+    #[derive(Default)]
+    struct InputState {
+        text: String,
+        marked_range_utf16: Option<Range<usize>>,
+        accepts_text_input: bool,
+        events: Vec<String>,
+    }
+
+    impl InputState {
+        fn utf16_len(&self) -> usize {
+            self.text.encode_utf16().count()
+        }
+
+        fn utf16_to_byte_offset(&self, utf16_offset: usize) -> usize {
+            let mut utf16 = 0;
+            for (byte_ix, ch) in self.text.char_indices() {
+                if utf16 >= utf16_offset {
+                    return byte_ix;
+                }
+                utf16 += ch.len_utf16();
+            }
+            self.text.len()
+        }
+
+        /// Replaces the given UTF-16 range with `new_text`, returning the
+        /// UTF-16 offset at which the replacement was inserted.
+        fn replace_utf16(&mut self, range_utf16: Range<usize>, new_text: &str) -> usize {
+            let start = self.utf16_to_byte_offset(range_utf16.start);
+            let end = self.utf16_to_byte_offset(range_utf16.end);
+            self.text.replace_range(start..end, new_text);
+            range_utf16.start
+        }
+    }
+
+    /// A minimal `InputHandler` implementing the IME contract the same way the
+    /// editor and terminal do: a `None` replacement range targets the marked
+    /// range if present, otherwise the caret (kept at the end of the text).
+    struct ScriptedInputHandler {
+        state: Rc<RefCell<InputState>>,
+    }
+
+    impl InputHandler for ScriptedInputHandler {
+        fn selected_text_range(
+            &mut self,
+            _ignore_disabled_input: bool,
+            _window: &mut Window,
+            _cx: &mut App,
+        ) -> Option<UTF16Selection> {
+            let caret = self.state.borrow().utf16_len();
+            Some(UTF16Selection {
+                range: caret..caret,
+                reversed: false,
+            })
+        }
+
+        fn marked_text_range(
+            &mut self,
+            _window: &mut Window,
+            _cx: &mut App,
+        ) -> Option<Range<usize>> {
+            self.state.borrow().marked_range_utf16.clone()
+        }
+
+        fn text_for_range(
+            &mut self,
+            _range_utf16: Range<usize>,
+            _adjusted_range: &mut Option<Range<usize>>,
+            _window: &mut Window,
+            _cx: &mut App,
+        ) -> Option<String> {
+            None
+        }
+
+        fn replace_text_in_range(
+            &mut self,
+            replacement_range: Option<Range<usize>>,
+            text: &str,
+            _window: &mut Window,
+            _cx: &mut App,
+        ) {
+            let mut state = self.state.borrow_mut();
+            state.events.push(format!(
+                "replace_text_in_range({replacement_range:?}, {text:?})"
+            ));
+            let range = replacement_range
+                .or_else(|| state.marked_range_utf16.clone())
+                .unwrap_or_else(|| {
+                    let caret = state.utf16_len();
+                    caret..caret
+                });
+            state.replace_utf16(range, text);
+            state.marked_range_utf16 = None;
+        }
+
+        fn replace_and_mark_text_in_range(
+            &mut self,
+            range_utf16: Option<Range<usize>>,
+            new_text: &str,
+            new_selected_range: Option<Range<usize>>,
+            _window: &mut Window,
+            _cx: &mut App,
+        ) {
+            let mut state = self.state.borrow_mut();
+            state.events.push(format!(
+                "replace_and_mark_text_in_range({range_utf16:?}, {new_text:?}, {new_selected_range:?})"
+            ));
+            let range = range_utf16
+                .or_else(|| state.marked_range_utf16.clone())
+                .unwrap_or_else(|| {
+                    let caret = state.utf16_len();
+                    caret..caret
+                });
+            let start = state.replace_utf16(range, new_text);
+            state.marked_range_utf16 = Some(start..start + new_text.encode_utf16().count());
+        }
+
+        fn unmark_text(&mut self, _window: &mut Window, _cx: &mut App) {
+            let mut state = self.state.borrow_mut();
+            state.events.push("unmark_text".to_string());
+            state.marked_range_utf16 = None;
+        }
+
+        fn bounds_for_range(
+            &mut self,
+            _range_utf16: Range<usize>,
+            _window: &mut Window,
+            _cx: &mut App,
+        ) -> Option<Bounds<Pixels>> {
+            None
+        }
+
+        fn character_index_for_point(
+            &mut self,
+            _point: Point<Pixels>,
+            _window: &mut Window,
+            _cx: &mut App,
+        ) -> Option<usize> {
+            None
+        }
+
+        fn accepts_text_input(&mut self, _window: &mut Window, _cx: &mut App) -> bool {
+            self.state.borrow().accepts_text_input
+        }
+    }
+
+    /// An element that registers a [`ScriptedInputHandler`] during paint while
+    /// its focus handle is focused, the way real text inputs do.
+    struct TestInputElement {
+        focus_handle: FocusHandle,
+        state: Rc<RefCell<InputState>>,
+    }
+
+    impl IntoElement for TestInputElement {
+        type Element = Self;
+
+        fn into_element(self) -> Self::Element {
+            self
+        }
+    }
+
+    impl Element for TestInputElement {
+        type RequestLayoutState = ();
+        type PrepaintState = ();
+
+        fn id(&self) -> Option<ElementId> {
+            None
+        }
+
+        fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+            None
+        }
+
+        fn request_layout(
+            &mut self,
+            _id: Option<&GlobalElementId>,
+            _inspector_id: Option<&InspectorElementId>,
+            window: &mut Window,
+            cx: &mut App,
+        ) -> (LayoutId, Self::RequestLayoutState) {
+            (window.request_layout(Style::default(), [], cx), ())
+        }
+
+        fn prepaint(
+            &mut self,
+            _id: Option<&GlobalElementId>,
+            _inspector_id: Option<&InspectorElementId>,
+            _bounds: Bounds<Pixels>,
+            _request_layout: &mut Self::RequestLayoutState,
+            _window: &mut Window,
+            _cx: &mut App,
+        ) -> Self::PrepaintState {
+        }
+
+        fn paint(
+            &mut self,
+            _id: Option<&GlobalElementId>,
+            _inspector_id: Option<&InspectorElementId>,
+            _bounds: Bounds<Pixels>,
+            _request_layout: &mut Self::RequestLayoutState,
+            _prepaint: &mut Self::PrepaintState,
+            window: &mut Window,
+            cx: &mut App,
+        ) {
+            window.handle_input(
+                &self.focus_handle,
+                ScriptedInputHandler {
+                    state: self.state.clone(),
+                },
+                cx,
+            );
+        }
+    }
+
+    struct TestInputView {
+        focus_handle: FocusHandle,
+        state: Rc<RefCell<InputState>>,
+    }
+
+    impl Render for TestInputView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .track_focus(&self.focus_handle)
+                .child(TestInputElement {
+                    focus_handle: self.focus_handle.clone(),
+                    state: self.state.clone(),
+                })
+        }
+    }
+
+    fn setup_input_test(
+        cx: &mut TestAppContext,
+        accepts_text_input: bool,
+        focused: bool,
+    ) -> (Rc<RefCell<InputState>>, &mut VisualTestContext) {
+        let state = Rc::new(RefCell::new(InputState {
+            accepts_text_input,
+            ..Default::default()
+        }));
+        let (view, cx) = {
+            let state = state.clone();
+            cx.add_window_view(move |_, cx| TestInputView {
+                focus_handle: cx.focus_handle(),
+                state,
+            })
+        };
+        if focused {
+            let focus_handle = view.read_with(cx, |view, _| view.focus_handle.clone());
+            cx.update(|window, cx| window.focus(&focus_handle, cx));
+            cx.run_until_parked();
+        }
+        (state, cx)
+    }
+
+    #[gpui::test]
+    fn test_focused_input_text_ops_with_no_input_handler(cx: &mut TestAppContext) {
+        let (state, cx) = setup_input_test(cx, true, false);
+
+        cx.update(|window, cx| {
+            assert!(!window.set_marked_text_in_focused_input("hello", cx));
+            assert!(!window.clear_marked_text_in_focused_input(false, cx));
+            assert!(!window.clear_marked_text_in_focused_input(true, cx));
+            assert!(!window.insert_text_into_focused_input("hello", cx));
+        });
+
+        assert_eq!(state.borrow().text, "");
+        assert!(state.borrow().events.is_empty());
+    }
+
+    #[gpui::test]
+    fn test_set_and_replace_marked_text_in_focused_input(cx: &mut TestAppContext) {
+        let (state, cx) = setup_input_test(cx, true, true);
+
+        assert!(cx.update(|window, cx| window.set_marked_text_in_focused_input("hello wor", cx)));
+        assert_eq!(state.borrow().text, "hello wor");
+        assert_eq!(state.borrow().marked_range_utf16, Some(0..9));
+
+        // Marking again replaces the existing marked text rather than appending.
+        assert!(cx.update(|window, cx| window.set_marked_text_in_focused_input("hello world", cx)));
+        assert_eq!(state.borrow().text, "hello world");
+        assert_eq!(state.borrow().marked_range_utf16, Some(0..11));
+
+        // The caret is placed at the end of the marked text.
+        assert_eq!(
+            state.borrow().events.last().unwrap(),
+            "replace_and_mark_text_in_range(None, \"hello world\", Some(11..11))"
+        );
+    }
+
+    #[gpui::test]
+    fn test_marked_text_caret_uses_utf16_offsets(cx: &mut TestAppContext) {
+        let (state, cx) = setup_input_test(cx, true, true);
+
+        // '🎤' is a single char but two UTF-16 code units.
+        assert!(cx.update(|window, cx| window.set_marked_text_in_focused_input("🎤 rec", cx)));
+        assert_eq!(state.borrow().marked_range_utf16, Some(0..6));
+        assert_eq!(
+            state.borrow().events.last().unwrap(),
+            "replace_and_mark_text_in_range(None, \"🎤 rec\", Some(6..6))"
+        );
+    }
+
+    #[gpui::test]
+    fn test_clear_marked_text_in_focused_input(cx: &mut TestAppContext) {
+        let (state, cx) = setup_input_test(cx, true, true);
+
+        // Commit: the marked text stays in the input and the composition ends.
+        cx.update(|window, cx| {
+            assert!(window.set_marked_text_in_focused_input("hello", cx));
+            assert!(window.clear_marked_text_in_focused_input(true, cx));
+        });
+        assert_eq!(state.borrow().text, "hello");
+        assert_eq!(state.borrow().marked_range_utf16, None);
+        assert_eq!(state.borrow().events.last().unwrap(), "unmark_text");
+
+        // Cancel: the marked text is removed from the input.
+        cx.update(|window, cx| {
+            assert!(window.set_marked_text_in_focused_input(" bye", cx));
+            assert!(window.clear_marked_text_in_focused_input(false, cx));
+        });
+        assert_eq!(state.borrow().text, "hello");
+        assert_eq!(state.borrow().marked_range_utf16, None);
+
+        // Clearing when nothing is marked reports success without mutating the input.
+        let events_before = state.borrow().events.len();
+        cx.update(|window, cx| {
+            assert!(window.clear_marked_text_in_focused_input(false, cx));
+            assert!(window.clear_marked_text_in_focused_input(true, cx));
+        });
+        assert_eq!(state.borrow().text, "hello");
+        assert_eq!(state.borrow().events.len(), events_before);
+    }
+
+    #[gpui::test]
+    fn test_insert_text_into_focused_input(cx: &mut TestAppContext) {
+        let (state, cx) = setup_input_test(cx, true, true);
+
+        assert!(cx.update(|window, cx| window.insert_text_into_focused_input("hello", cx)));
+        assert_eq!(state.borrow().text, "hello");
+
+        // Inserting while marked text is present replaces the marked text
+        // (standard IME commit semantics).
+        cx.update(|window, cx| {
+            assert!(window.set_marked_text_in_focused_input(" wor", cx));
+            assert!(window.insert_text_into_focused_input(" world", cx));
+        });
+        assert_eq!(state.borrow().text, "hello world");
+        assert_eq!(state.borrow().marked_range_utf16, None);
+    }
+
+    #[gpui::test]
+    fn test_focused_input_that_rejects_text_input(cx: &mut TestAppContext) {
+        let (state, cx) = setup_input_test(cx, false, true);
+
+        cx.update(|window, cx| {
+            assert!(!window.set_marked_text_in_focused_input("hello", cx));
+            assert!(!window.insert_text_into_focused_input("hello", cx));
+            // Clearing is intentionally not gated on `accepts_text_input`, so a
+            // stale mark can still be cleaned up after an input stops accepting
+            // text; with nothing marked it is a no-op.
+            assert!(window.clear_marked_text_in_focused_input(false, cx));
+        });
+
+        assert_eq!(state.borrow().text, "");
+        assert!(state.borrow().events.is_empty());
     }
 }

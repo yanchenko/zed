@@ -478,6 +478,7 @@ dependencies = [
  "component",
  "context_server",
  "db",
+ "dontspeak",
  "editor",
  "eval_utils",
  "extension",
@@ -5403,6 +5404,39 @@ dependencies = [
  "quote",
  "strum 0.27.2",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "dontspeak"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "command_palette_hooks",
+ "futures 0.3.32",
+ "gpui",
+ "log",
+ "net",
+ "paths",
+ "serde",
+ "serde_json",
+ "settings",
+ "smol",
+ "tempfile",
+]
+
+[[package]]
+name = "dontspeak_ui"
+version = "0.1.0"
+dependencies = [
+ "command_palette_hooks",
+ "dontspeak",
+ "gpui",
+ "log",
+ "settings",
+ "tempfile",
+ "ui",
+ "workspace",
+ "zed_actions",
 ]
 
 [[package]]
@@ -16732,6 +16766,7 @@ dependencies = [
  "copilot",
  "copilot_ui",
  "cpal",
+ "dontspeak",
  "edit_prediction",
  "edit_prediction_ui",
  "editor",
@@ -16750,6 +16785,7 @@ dependencies = [
  "language_model",
  "log",
  "menu",
+ "net",
  "paths",
  "picker",
  "platform_title_bar",
@@ -23039,6 +23075,8 @@ dependencies = [
  "debugger_ui",
  "dev_container",
  "diagnostics",
+ "dontspeak",
+ "dontspeak_ui",
  "edit_prediction",
  "edit_prediction_ui",
  "editor",

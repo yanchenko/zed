@@ -691,6 +691,8 @@ fn main() {
         );
 
         copilot_ui::init(&app_state, cx);
+        dontspeak::init(cx);
+        dontspeak_ui::init(cx);
         language_model::init(cx);
         RefreshLlmTokenListener::register(
             app_state.client.clone(),

@@ -1,5 +1,6 @@
 mod action;
 mod agent;
+mod dontspeak;
 mod editor;
 mod extension;
 mod fallible_options;
@@ -15,6 +16,7 @@ mod workspace;
 
 pub use action::{ActionName, ActionWithArguments, CommandAliasTarget};
 pub use agent::*;
+pub use dontspeak::*;
 pub use editor::*;
 pub use extension::*;
 pub use fallible_options::*;
@@ -168,6 +170,9 @@ pub struct SettingsContent {
 
     /// Configuration for Diagnostics-related features.
     pub diagnostics: Option<DiagnosticsSettingsContent>,
+
+    /// Configuration of the DontSpeak voice integration.
+    pub dontspeak: Option<DontSpeakSettingsContent>,
 
     /// Configuration for Git-related features
     pub git: Option<GitSettings>,
